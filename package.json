@@ -1,2 +1,5 @@
-
-{"name": "nono-app", "version": "1.0.0", "dependencies": {"@vercel/blob": "^0.23.4"}}
+{
+  "name": "nono",
+  "private": true,
+  "dependencies": { "@vercel/blob": "^1.0.0" }
+}
