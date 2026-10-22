@@ -372,6 +372,20 @@ function ee(x){er(x&&(x&&(x.error||x.message))||'خطأ غير معروف')}
 function go(n){step=n;['a1','a2','a3'].forEach(function(x,i){$(x).hidden=(i+1!==n)});
  var T=[['أهلاً بك في NONO','اكتب رقم هاتفك أو يوزرك للدخول أو لإنشاء حساب','متابعة'],['أهلاً بعودتك','اكتب كلمة السر لحسابك','دخول'],['إنشاء حساب جديد','اختر يوزر ما يشبه أحد، وكلمة سر. البريد اختياري','إنشاء الحساب']][n-1];
  $('at').textContent=T[0];$('ap').textContent=T[1];$('anext').textContent=T[2];$('aback').hidden=(n===1);er('')}
+
+// ---- التحقق بكود SMS عبر Firebase ----
+function fbErr(e){var m={'auth/invalid-phone-number':'رقم الهاتف غير صحيح','auth/too-many-requests':'طلبات كثيرة، جرّب بعد شوي','auth/invalid-verification-code':'الكود غلط','auth/code-expired':'الكود منتهي، اطلب كود جديد','auth/operation-not-allowed':'تفعيل الهاتف غير مكتمل بـ Firebase (فعّل Phone، وتأكد انه مسموح لدولة العراق)','auth/unauthorized-domain':'دومين الموقع غير مضاف بـ Firebase (Authentication > Settings > Authorized domains)','auth/network-request-failed':'ما في اتصال بالإنترنت','auth/quota-exceeded':'انتهى حد رسائل SMS بـ Firebase','auth/billing-not-enabled':'لازم تفعّل خطة Blaze بـ Firebase حتى ترسل SMS','auth/captcha-check-failed':'فشل التحقق من reCAPTCHA، حدّث الصفحة'};return{error:m[e.code]||('فشل التحقق: '+(e.code||e.message))}}
+function otp(phone){return new Promise(function(ok,no){
+ if(!window.fbSend)return no({error:'مكتبة Firebase ما تحملت، تأكد من الإنترنت وحدّث الصفحة'});
+ window.fbSend(phone).then(function(){
+  var m=modal('<b>كود التحقق</b><small>أرسلنا كود SMS إلى <span dir="ltr">'+esc(phone)+'</span></small><input id="otpc" inputmode="numeric" maxlength="6" dir="ltr" placeholder="000000" style="text-align:center;font-size:22px;letter-spacing:6px"><div id="otpe" style="color:#ff8a98;min-height:18px"></div><button class="btn full" data-o="ok">تأكيد</button><button class="lnk" data-o="x">إلغاء</button>');
+  m.onclick=function(e){var b=e.target.closest('[data-o]');if(!b)return;
+   if(b.dataset.o==='x'){m.remove();window.fbReset();return no({error:'تم إلغاء التحقق'})}
+   var c=nd($('otpc').value.trim());if(c.length!==6)return $('otpe').textContent='اكتب الكود من 6 أرقام';
+   $('otpe').textContent='جاري التحقق...';
+   window.fbCheck(c).then(function(t){m.remove();ok(t)}).catch(function(x){$('otpe').textContent=fbErr(x).error})}
+ }).catch(function(e){window.fbReset();no(fbErr(e))})})}
+function withOtp(p,body){return api(p,body).then(function(r){return r.otp?otp(r.phone).then(function(t){body.idToken=t;return api(p,body)}):r})}
 function enter(r){TOK=r.token;ls('nono_tok',TOK);boot()}
 $('anext').onclick=function(){
  if(step===1){var v=nd($('ph').value.trim());if(!v)return er('اكتب رقم الهاتف أو اليوزر');api('/api/check',{id:v}).then(function(r){aid=v;if(r.exists)go(2);else if(r.phone)go(3);else er('ما لقينا حساب بهذا اليوزر. سجّل برقم هاتفك')}).catch(ee)}
@@ -650,8 +664,8 @@ window.go=function(){setMode(0)};
 $('w1').onclick=function(){setMode(1)};$('w2').onclick=function(){setMode(2)};
 $('aback').onclick=function(){setMode(0)};
 $('anext').onclick=function(){var v=nd($('ph').value.trim());
- if(mode===1){if(!v)return er('اكتب رقم الهاتف أو اليوزر');if(!$('pw').value)return er('اكتب كلمة السر');api('/api/login',{id:v,password:$('pw').value}).then(enter).catch(ee)}
- else if(mode===2){if(!v)return er('اكتب رقم الهاتف');api('/api/signup',{phone:v,username:$('un').value,name:nm.value,password:$('pw2').value,email:$('em').value}).then(enter).catch(ee)}};
+ if(mode===1){if(!v)return er('اكتب رقم الهاتف أو اليوزر');if(!$('pw').value)return er('اكتب كلمة السر');withOtp('/api/login',{id:v,password:$('pw').value}).then(enter).catch(ee)}
+ else if(mode===2){if(!v)return er('اكتب رقم الهاتف');withOtp('/api/signup',{phone:v,username:$('un').value,name:nm.value,password:$('pw2').value,email:$('em').value}).then(enter).catch(ee)}};
 setMode(0);
 
 // ---- الوسائط: بدقة الجهاز بدون ضغط ----
@@ -807,26 +821,16 @@ window.openStory=function(i){_os(i);var s=ST[i];if(!s)return;
  if(!s.me)api('/api/stories/view',{id:s.id}).catch(function(){})};
 window.drawGrid=function(){$('grid').innerHTML=ST.length?ST.map(function(s,i){return'<button class="card" data-st="'+i+'" style="background:linear-gradient(160deg,'+esc(s.color)+',var(--red-d))"><b>'+esc(s.me?'قصتك':s.name)+'</b><small>'+esc(s.text.slice(0,40))+'</small><small style="margin-top:4px">'+agoL(s.time)+(s.me?' · 👁 '+(s.views||0)+' · ❤ '+s.likes:'')+'</small></button>'}).join(''):'<p class="emp" style="grid-column:1/-1">ما في قصص بعد. كن أول واحد ينشر 🔥</p>'};
 })();
-</script// Import the functions you need from the SDKs you need
-import { initializeApp } from "firebase/app";
-import { getAnalytics } from "firebase/analytics";
-// TODO: Add SDKs for Firebase products that you want to use
-// https://firebase.google.com/docs/web/setup#available-libraries
-
-// Your web app's Firebase configuration
-// For Firebase JS SDK v7.20.0 and later, measurementId is optional
-const firebaseConfig = {
-  apiKey: "AIzaSyD0RHTyMNl9wQ3AzXCjyRfWVFmt9GKSKl8",
-  authDomain: "nono-6a3a6.firebaseapp.com",
-  projectId: "nono-6a3a6",
-  storageBucket: "nono-6a3a6.firebasestorage.app",
-  messagingSenderId: "622545893840",
-  appId: "1:622545893840:web:271cd0b391982f5b46e1d5",
-  measurementId: "G-W3GKZ8Y61K"
-};
-
-// Initialize Firebase
-const app = initializeApp(firebaseConfig);
-const analytics = getAnalytics(app);>
+</script>
+<div id="rc"></div>
+<script type="module">
+import {initializeApp} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import {getAuth,RecaptchaVerifier,signInWithPhoneNumber} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+const auth=getAuth(initializeApp({apiKey:"AIzaSyD0RHTyMNl9wQ3AzXCjyRfWVFmt9GKSKl8",authDomain:"nono-6a3a6.firebaseapp.com",projectId:"nono-6a3a6",storageBucket:"nono-6a3a6.firebasestorage.app",messagingSenderId:"622545893840",appId:"1:622545893840:web:271cd0b391982f5b46e1d5"}));
+auth.languageCode='ar';let conf=null,rv=null;
+window.fbReset=()=>{try{rv&&rv.clear()}catch(e){}rv=null};
+window.fbSend=async p=>{window.fbReset();rv=new RecaptchaVerifier(auth,'rc',{size:'invisible'});conf=await signInWithPhoneNumber(auth,p,rv)};
+window.fbCheck=async c=>(await conf.confirm(c)).user.getIdToken();
+</script>
 </body>
 </html>
