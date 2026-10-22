@@ -44,7 +44,7 @@ const rbuf = async req => { if (Buffer.isBuffer(req.body)) return req.body; if (
 const S = s => String(s == null ? '' : s).trim();
 const hash = (p, s) => crypto.scryptSync(p, s, 32).toString('hex');
 const live = s => Date.now() - s.time < 864e5;
-const MT = { 'image/jpeg': 'image', 'image/png': 'image', 'image/webp': 'image', 'video/mp4': 'video', 'video/quicktime': 'video', 'video/webm': 'video', 'audio/mp4': 'audio', 'audio/x-m4a': 'audio', 'audio/aac': 'audio', 'audio/mpeg': 'audio', 'audio/webm': 'audio', 'audio/ogg': 'audio', 'audio/wav': 'audio' };
+const MT = { 'image/jpeg': 'image', 'image/png': 'image', 'image/webp': 'image', 'video/mp4': 'video', 'video/quicktime': 'video', 'video/webm': 'video', 'audio/mp4': 'audio', 'audio/x-m4a': 'audio', 'audio/aac': 'audio', 'audio/mpeg': 'audio', 'audio/webm': 'audio', 'audio/ogg': 'audio', 'audio/wav': 'audio', 'application/pdf': 'file', 'application/msword': 'file', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'file', 'application/vnd.ms-excel': 'file', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'file', 'application/vnd.ms-powerpoint': 'file', 'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'file', 'text/plain': 'file', 'application/zip': 'file' };
 const owned = (me, id) => { const m = db.media[S(id)]; return m && m.un === me ? m : null; };
 const rmMedia = id => { const m = db.media[id]; if (!m) return; delete db.media[id]; if (m.url) pendDel.push(m.url); };
 const prune = () => { db.stories.filter(s => !live(s)).forEach(s => s.m && rmMedia(s.m)); db.stories = db.stories.filter(live); save(); };
@@ -132,7 +132,7 @@ async function upload(req, res) {
   let url;
   try { url = (await put('m/' + id, buf, { access: 'public', contentType: mime, addRandomSuffix: false })).url; }
   catch (e) { err(r, 'فشل حفظ الملف بمخزن Blob: ' + e.message, 502); return fin(res, r); }
-  for (let i = 0; i < 6; i++) { await load(); db.media[id] = { un: m.un, mime, kind, time: Date.now(), size: buf.length, url }; if (await commit()) break; }
+  for (let i = 0; i < 6; i++) { await load(); db.media[id] = { un: m.un, mime, kind, name: (() => { try { return decodeURIComponent(S(req.headers['x-filename'])).slice(0, 80); } catch (e) { return ''; } })(), time: Date.now(), size: buf.length, url }; if (await commit()) break; }
   send(r, 200, { id, kind, mime }); fin(res, r);
 }
 
@@ -282,9 +282,9 @@ function route(req, res, P, u, b) {
   if (K === 'GET /api/chats') {
     const out = db.friends.filter(f => f[0] === me || f[1] === me).map(f => {
       const o = f[0] === me ? f[1] : f[0];
-      const ms = db.msgs.filter(x => (x.from === me && x.to === o) || (x.from === o && x.to === me));
+      const ms = db.msgs.filter(x => ((x.from === me && x.to === o) || (x.from === o && x.to === me)) && !(x.hid && x.hid.includes(me)));
       const l = ms[ms.length - 1];
-      return { un: o, name: nm(o), av: av(o), last: l ? (l.text || (l.st ? 'ملصق' : l.k === 'video' ? '🎥 فيديو' : l.k === 'audio' ? '🎤 رسالة صوتية' : '📷 صورة')).slice(0, 60) : '', time: l ? l.time : 0, unread: ms.filter(x => x.from === o && !x.r).length };
+      return { un: o, name: nm(o), av: av(o), last: l ? (l.text || (l.st ? 'ملصق' : l.k === 'video' ? '🎥 فيديو' : l.k === 'audio' ? '🎤 رسالة صوتية' : l.k === 'file' ? '📎 ' + (l.fn || 'ملف') : '📷 صورة')).slice(0, 60) : '', time: l ? l.time : 0, unread: ms.filter(x => x.from === o && !x.r).length, blocked: (db.blocks || []).some(x => x[0] === me && x[1] === o) ? 1 : 0 };
     });
     return send(res, 200, out.sort((a, c) => c.time - a.time));
   }
@@ -292,10 +292,10 @@ function route(req, res, P, u, b) {
     const o = S(u.searchParams.get('with'));
     if (!isF(me, o)) return err(res, 'ما بينكم صداقة', 403);
     let ch = false;
-    const ms = db.msgs.filter(x => (x.from === me && x.to === o) || (x.from === o && x.to === me));
+    const ms = db.msgs.filter(x => ((x.from === me && x.to === o) || (x.from === o && x.to === me)) && !(x.hid && x.hid.includes(me)));
     ms.forEach(x => { if (x.to === me && !x.r) { x.r = 1; ch = true; } });
     if (ch) save();
-    return send(res, 200, ms.slice(-200).map(x => ({ from: x.from, text: x.text, m: x.m || '', k: x.k || '', st: x.st || '', time: x.time })));
+    return send(res, 200, ms.slice(-200).map(x => ({ from: x.from, text: x.text, m: x.m || '', k: x.k || '', st: x.st || '', fn: x.fn || '', r: x.r ? 1 : 0, time: x.time })));
   }
   if (K === 'POST /api/send') {
     const to = S(b.to), text = S(b.text).slice(0, 500);
@@ -303,7 +303,8 @@ function route(req, res, P, u, b) {
     if (b.media && !md) return err(res, 'الملف غير صالح');
     if (!text && !md && !stk) return err(res, 'الرسالة فارغة');
     if (!isF(me, to)) return err(res, 'لازم يوافق على طلبك أول', 403);
-    db.msgs.push({ from: me, to, text, m: md ? b.media : '', k: md ? md.kind : '', st: stk, time: Date.now(), r: 0 }); save(); return send(res, 200, { ok: 1 });
+    if ((db.blocks || []).some(x => (x[0] === me && x[1] === to) || (x[0] === to && x[1] === me))) return err(res, 'ما تكدر ترسل لهذا الشخص', 403);
+    db.msgs.push({ from: me, to, text, fn: md ? (md.name || '') : '', m: md ? b.media : '', k: md ? md.kind : '', st: stk, time: Date.now(), r: 0 }); save(); return send(res, 200, { ok: 1 });
   }
   const ok = () => send(res, 200, { ok: 1 });
   const vp = id => { const p = db.posts.find(x => x.id === S(id)); return p && canSee(me, p.un) ? p : null; };
@@ -356,6 +357,8 @@ function route(req, res, P, u, b) {
     save(); return send(res, 200, { following: i < 0 });
   }
   if (K === 'POST /api/followers/remove') { db.follows = db.follows.filter(f => !(f[0] === S(b.from) && f[1] === me)); save(); return ok(); }
+  if (K === 'POST /api/block') { const t = S(b.to); db.blocks = (db.blocks || []).filter(x => !(x[0] === me && x[1] === t)); if (b.on) db.blocks.push([me, t]); save(); return ok(); }
+  if (K === 'POST /api/chat/delete') { const o = S(b.with); db.msgs.forEach(x => { if (((x.from === me && x.to === o) || (x.from === o && x.to === me)) && !(x.hid && x.hid.includes(me))) x.hid = (x.hid || []).concat(me); }); save(); return ok(); }
   if (K === 'POST /api/unfriend') { const t = S(b.to); db.friends = db.friends.filter(f => !((f[0] === me && f[1] === t) || (f[0] === t && f[1] === me))); save(); return ok(); }
   if (K === 'GET /api/posts') {
     const okSet = new Set([me, ...db.friends.filter(f => f[0] === me || f[1] === me).map(f => f[0] === me ? f[1] : f[0]), ...db.follows.filter(f => f[0] === me).map(f => f[1])]);
