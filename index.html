@@ -807,6 +807,26 @@ window.openStory=function(i){_os(i);var s=ST[i];if(!s)return;
  if(!s.me)api('/api/stories/view',{id:s.id}).catch(function(){})};
 window.drawGrid=function(){$('grid').innerHTML=ST.length?ST.map(function(s,i){return'<button class="card" data-st="'+i+'" style="background:linear-gradient(160deg,'+esc(s.color)+',var(--red-d))"><b>'+esc(s.me?'قصتك':s.name)+'</b><small>'+esc(s.text.slice(0,40))+'</small><small style="margin-top:4px">'+agoL(s.time)+(s.me?' · 👁 '+(s.views||0)+' · ❤ '+s.likes:'')+'</small></button>'}).join(''):'<p class="emp" style="grid-column:1/-1">ما في قصص بعد. كن أول واحد ينشر 🔥</p>'};
 })();
-</script>
+</script// Import the functions you need from the SDKs you need
+import { initializeApp } from "firebase/app";
+import { getAnalytics } from "firebase/analytics";
+// TODO: Add SDKs for Firebase products that you want to use
+// https://firebase.google.com/docs/web/setup#available-libraries
+
+// Your web app's Firebase configuration
+// For Firebase JS SDK v7.20.0 and later, measurementId is optional
+const firebaseConfig = {
+  apiKey: "AIzaSyD0RHTyMNl9wQ3AzXCjyRfWVFmt9GKSKl8",
+  authDomain: "nono-6a3a6.firebaseapp.com",
+  projectId: "nono-6a3a6",
+  storageBucket: "nono-6a3a6.firebasestorage.app",
+  messagingSenderId: "622545893840",
+  appId: "1:622545893840:web:271cd0b391982f5b46e1d5",
+  measurementId: "G-W3GKZ8Y61K"
+};
+
+// Initialize Firebase
+const app = initializeApp(firebaseConfig);
+const analytics = getAnalytics(app);>
 </body>
 </html>
