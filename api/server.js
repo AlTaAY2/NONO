@@ -130,7 +130,7 @@ const storyOK = (s, v) => {
   return true;
 };
 const cnt = u => ({ posts: db.posts.filter(p => p.un === u).length, friends: db.friends.filter(f => f[0] === u || f[1] === u).length, followers: db.follows.filter(f => f[1] === u).length, following: db.follows.filter(f => f[0] === u).length });
-const pv = (p, me) => ({ id: p.id, un: p.un, name: nm(p.un), av: av(p.un), v: isV(p.un) ? 1 : 0, text: p.text, img: !!(p.img || p.m), time: p.time, likes: p.likes.length, liked: p.likes.includes(me), cc: p.cm.length, saved: ((db.users[me] || {}).saves || []).includes(p.id), me: p.un === me });
+const pv = (p, me) => ({ id: p.id, un: p.un, name: nm(p.un), av: av(p.un), v: isV(p.un) ? 1 : 0, text: p.text, img: !!(p.img || p.m), time: p.time, likes: p.likes.length, liked: p.likes.includes(me), cc: p.cm.length, saved: ((db.users[me] || {}).saves || []).includes(p.id), me: p.un === me, cat: p.cat || 'pub' });
 const person = (u, me) => ({ un: u, name: nm(u), av: av(u), v: isV(u) ? 1 : 0, rel: rel(me, u), following: isFol(me, u) });
 const imgOK = s => /^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(s) && s.length < 5e5;
 const sv = (s, me) => ({ id: s.id, un: s.un, name: nm(s.un), av: av(s.un), v: isV(s.un) ? 1 : 0, st: s.st || null, text: s.text || (s.m ? (s.k === 'video' ? '🎥 فيديو' : '📷 صورة') : ''), cap: s.text, m: s.m || '', k: s.k || '', color: s.color, time: s.time, me: s.un === me, likes: (s.likes || []).length, liked: (s.likes || []).includes(me), views: s.un === me ? (s.views || []).length : 0 });
@@ -409,9 +409,16 @@ function route(req, res, P, u, b) {
   if (K === 'POST /api/unfriend') { const t = S(b.to); db.friends = db.friends.filter(f => !((f[0] === me && f[1] === t) || (f[0] === t && f[1] === me))); save(); return ok(); }
   if (K === 'GET /api/trend') {
     const n = Date.now(), bl = db.blocks || [];
-    const l = db.posts.filter(p => n - p.time < 12096e5 && canSee(me, p.un) && !bl.some(x => (x[0] === me && x[1] === p.un) || (x[0] === p.un && x[1] === me)))
+    const l = db.posts.filter(p => p.cat !== 'local' && n - p.time < 12096e5 && canSee(me, p.un) && !bl.some(x => (x[0] === me && x[1] === p.un) || (x[0] === p.un && x[1] === me)))
       .map(p => [p, p.likes.length * 2 + p.cm.length * 3 + (n - p.time < 864e5 ? 3 : 0)]).sort((a, b) => b[1] - a[1] || b[0].time - a[0].time).slice(0, 30);
     return send(res, 200, l.map(x => pv(x[0], me)));
+  }
+  if (K === 'GET /api/local') {
+    const lq = S(u.searchParams.get('cc')).toLowerCase(), n = Date.now(), bl = db.blocks || [];
+    const lcc = /^[a-z]{2}$/.test(lq) ? lq : (/^[a-z]{2}$/i.test(S(req.headers['x-vercel-ip-country'])) ? S(req.headers['x-vercel-ip-country']).toLowerCase() : 'iq');
+    const l = db.posts.filter(p => p.cat === 'local' && p.cc === lcc && n - p.time < 6048e5 && canSee(me, p.un) && !bl.some(x => (x[0] === me && x[1] === p.un) || (x[0] === p.un && x[1] === me)))
+      .sort((a, b) => b.time - a.time).slice(0, 30);
+    return send(res, 200, { cc: lcc, items: l.map(p => pv(p, me)) });
   }
   if (K === 'GET /api/posts') {
     const okSet = new Set([me, ...db.friends.filter(f => f[0] === me || f[1] === me).map(f => f[0] === me ? f[1] : f[0]), ...db.follows.filter(f => f[0] === me).map(f => f[1])]);
@@ -423,7 +430,9 @@ function route(req, res, P, u, b) {
     if (b.media && (!pm || pm.kind !== 'image')) return err(res, 'الصورة غير صالحة');
     if (!text && !img && !pm) return err(res, 'اكتب شي أو أضف صورة');
     if (img && !imgOK(img)) return err(res, 'الصورة غير صالحة');
-    db.posts.push({ id: rid(), un: me, text, img, m: pm ? b.media : '', time: Date.now(), likes: [], cm: [] });
+    const pcat = b.cat === 'local' ? 'local' : 'pub', pq = S(b.cc).toLowerCase();
+    const pcc = pcat === 'local' ? (/^[a-z]{2}$/.test(pq) ? pq : (/^[a-z]{2}$/i.test(S(req.headers['x-vercel-ip-country'])) ? S(req.headers['x-vercel-ip-country']).toLowerCase() : 'iq')) : '';
+    db.posts.push({ id: rid(), un: me, text, img, m: pm ? b.media : '', time: Date.now(), likes: [], cm: [], cat: pcat, cc: pcc });
     save(); return ok();
   }
   if (K === 'POST /api/posts/delete') { const dp = db.posts.find(p => p.id === S(b.id) && p.un === me); if (dp && dp.m) rmMedia(dp.m); db.posts = db.posts.filter(p => !(p.id === S(b.id) && p.un === me)); save(); return ok(); }
