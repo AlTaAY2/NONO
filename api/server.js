@@ -87,6 +87,13 @@ const av = u => (db.users[u] || {}).avt || 0;
 const setg = u => { const s = (db.users[u] || {}).set || {}; return { n: Object.assign({ msg: 1, post: 1, story: 1, req: 1 }, s.n || {}), priv: s.priv ? 1 : 0, noreq: s.noreq ? 1 : 0 }; };
 const canSee = (v, o) => v === o || !setg(o).priv || isF(v, o);
 const isFol = (a, b) => db.follows.some(f => f[0] === a && f[1] === b);
+const storyOK = (s, v) => {
+  if (s.un === v) return true; if (!canSee(v, s.un)) return false;
+  if (s.vis === 'friends') return isF(v, s.un);
+  if (s.vis === 'only') return (s.to || []).includes(v);
+  if (s.vis === 'followers') return isFol(v, s.un) || isF(v, s.un);
+  return true;
+};
 const cnt = u => ({ posts: db.posts.filter(p => p.un === u).length, friends: db.friends.filter(f => f[0] === u || f[1] === u).length, followers: db.follows.filter(f => f[1] === u).length, following: db.follows.filter(f => f[0] === u).length });
 const pv = (p, me) => ({ id: p.id, un: p.un, name: nm(p.un), av: av(p.un), text: p.text, img: !!(p.img || p.m), time: p.time, likes: p.likes.length, liked: p.likes.includes(me), cc: p.cm.length, saved: ((db.users[me] || {}).saves || []).includes(p.id), me: p.un === me });
 const person = (u, me) => ({ un: u, name: nm(u), av: av(u), rel: rel(me, u), following: isFol(me, u) });
@@ -143,6 +150,7 @@ function route(req, res, P, u, b) {
     const raw = S(b.contact || b.phone), isE = raw.includes('@'), un = S(b.username).toLowerCase().replace(/^@/, ''), pw = S(b.password);
     if (!/^(?=.*[a-z])[a-z0-9_.]{3,20}$/.test(un)) return err(res, 'اليوزر: 3 إلى 20 خانة، حروف إنجليزية وأرقام و _ و .');
     if (pw.length < 6) return err(res, 'كلمة السر لازم 6 خانات على الأقل');
+    if (!isE) return err(res, 'التسجيل بالبريد الإلكتروني فقط');
     if (db.users[un]) return err(res, 'هذا اليوزر مأخوذ، اختر غيره', 409);
     const salt = crypto.randomBytes(16).toString('hex'), name = S(b.name).slice(0, 40) || un;
     if (isE) {
@@ -190,7 +198,7 @@ function route(req, res, P, u, b) {
   if (K === 'POST /api/login') {
     const f = find(b.id), k = S(b.id).toLowerCase(), x = db.fails[k] || { n: 0, t: 0 };
     if (x.n >= 5 && Date.now() - x.t < 6e5) return err(res, 'محاولات كثيرة، جرّب بعد 10 دقايق', 429);
-    if (!f) { db.fails[k] = { n: x.n + 1, t: Date.now() }; save(); return err(res, 'ما في حساب بهذا اليوزر أو الرقم', 404); }
+    if (!f) { db.fails[k] = { n: x.n + 1, t: Date.now() }; save(); return err(res, 'ما في حساب بهذا اليوزر أو البريد', 404); }
     if (hash(S(b.password), f.salt) !== f.hash) { db.fails[k] = { n: x.n + 1, t: Date.now() }; save(); return err(res, 'كلمة السر غلط', 401); }
     delete db.fails[k]; return login(res, f.un);
   }
@@ -245,14 +253,17 @@ function route(req, res, P, u, b) {
     const posts = db.posts.filter(p => canSee(me, p.un) && p.text.toLowerCase().includes(q)).slice(-20).reverse().map(p => ({ id: p.id, un: p.un, name: nm(p.un), av: av(p.un), text: p.text }));
     return send(res, 200, { users, stories, posts });
   }
-  if (K === 'GET /api/stories') return send(res, 200, db.stories.filter(s => live(s) && canSee(me, s.un)).reverse().map(s => sv(s, me)));
+  if (K === 'GET /api/stories') return send(res, 200, db.stories.filter(s => live(s) && storyOK(s, me)).reverse().map(s => sv(s, me)));
   if (K === 'POST /api/stories') {
     const text = S(b.text).slice(0, 200);
     const md = b.media && owned(me, b.media);
     if (b.media && !md) return err(res, 'الملف غير صالح');
     if (!text && !md) return err(res, 'اكتب شي أو أضف صورة');
     const color = /^#[0-9a-f]{6}$/i.test(S(b.color)) ? S(b.color) : '#E11D32';
-    db.stories.push({ id: crypto.randomBytes(6).toString('hex'), un: me, text, color, m: md ? b.media : '', k: md ? md.kind : '', time: Date.now() });
+    const vis = ['followers', 'friends', 'only'].includes(S(b.vis)) ? S(b.vis) : 'followers';
+    const to = vis === 'only' ? (Array.isArray(b.to) ? b.to : []).map(S).filter(x => db.users[x] && x !== me).slice(0, 100) : [];
+    if (vis === 'only' && !to.length) return err(res, 'اختر شخص واحد على الأقل');
+    db.stories.push({ id: crypto.randomBytes(6).toString('hex'), un: me, text, color, m: md ? b.media : '', k: md ? md.kind : '', time: Date.now(), vis, to });
     prune(); return send(res, 200, { ok: 1 });
   }
   if (K === 'POST /api/stories/delete') { const dx = db.stories.find(s => s.id === b.id && s.un === me); if (dx && dx.m) rmMedia(dx.m); db.stories = db.stories.filter(s => !(s.id === b.id && s.un === me)); save(); return send(res, 200, { ok: 1 }); }
@@ -360,6 +371,12 @@ function route(req, res, P, u, b) {
   if (K === 'POST /api/block') { const t = S(b.to); db.blocks = (db.blocks || []).filter(x => !(x[0] === me && x[1] === t)); if (b.on) db.blocks.push([me, t]); save(); return ok(); }
   if (K === 'POST /api/chat/delete') { const o = S(b.with); db.msgs.forEach(x => { if (((x.from === me && x.to === o) || (x.from === o && x.to === me)) && !(x.hid && x.hid.includes(me))) x.hid = (x.hid || []).concat(me); }); save(); return ok(); }
   if (K === 'POST /api/unfriend') { const t = S(b.to); db.friends = db.friends.filter(f => !((f[0] === me && f[1] === t) || (f[0] === t && f[1] === me))); save(); return ok(); }
+  if (K === 'GET /api/trend') {
+    const n = Date.now(), bl = db.blocks || [];
+    const l = db.posts.filter(p => n - p.time < 12096e5 && canSee(me, p.un) && !bl.some(x => (x[0] === me && x[1] === p.un) || (x[0] === p.un && x[1] === me)))
+      .map(p => [p, p.likes.length * 2 + p.cm.length * 3 + (n - p.time < 864e5 ? 3 : 0)]).sort((a, b) => b[1] - a[1] || b[0].time - a[0].time).slice(0, 30);
+    return send(res, 200, l.map(x => pv(x[0], me)));
+  }
   if (K === 'GET /api/posts') {
     const okSet = new Set([me, ...db.friends.filter(f => f[0] === me || f[1] === me).map(f => f[0] === me ? f[1] : f[0]), ...db.follows.filter(f => f[0] === me).map(f => f[1])]);
     return send(res, 200, db.posts.filter(p => okSet.has(p.un) && canSee(me, p.un)).slice(-60).reverse().map(p => pv(p, me)));
@@ -401,9 +418,9 @@ function route(req, res, P, u, b) {
     const p = vp(b.id); if (!p) return err(res, 'المنشور غير موجود', 404);
     p.cm = p.cm.filter(c => !(c.id === S(b.cid) && (c.un === me || p.un === me))); save(); return ok();
   }
-  if (K === 'POST /api/stories/view') { const s = db.stories.find(x => x.id === S(b.id) && live(x) && canSee(me, x.un)); if (s && s.un !== me) { s.views = s.views || []; if (!s.views.includes(me)) { s.views.push(me); save(); } } return send(res, 200, { ok: 1 }); }
+  if (K === 'POST /api/stories/view') { const s = db.stories.find(x => x.id === S(b.id) && live(x) && storyOK(x, me)); if (s && s.un !== me) { s.views = s.views || []; if (!s.views.includes(me)) { s.views.push(me); save(); } } return send(res, 200, { ok: 1 }); }
     if (K === 'POST /api/stories/like') {
-    const s = db.stories.find(x => x.id === S(b.id) && live(x) && canSee(me, x.un)); if (!s) return err(res, 'القصة غير موجودة', 404);
+    const s = db.stories.find(x => x.id === S(b.id) && live(x) && storyOK(x, me)); if (!s) return err(res, 'القصة غير موجودة', 404);
     s.likes = s.likes || []; const i = s.likes.indexOf(me);
     if (i >= 0) s.likes.splice(i, 1); else s.likes.push(me);
     if (i < 0) notify(s.un, 'story', me, 'أعجبته قصتك');
