@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const { put, del } = require('@vercel/blob');
 const RU = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL, RT = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
-const fresh = () => ({ users: {}, tokens: {}, friends: [], reqs: [], msgs: [], stories: [], posts: [], follows: [], media: {}, fails: {}, codes: {} });
+const fresh = () => ({ users: {}, tokens: {}, friends: [], reqs: [], msgs: [], stories: [], posts: [], follows: [], media: {}, fails: {}, codes: {}, secrets: [] });
 let db = fresh(), ver = '0', dirty = false, pendDel = [], pendMail = [];
 const save = () => { dirty = true; };
 // ---- Redis (Upstash REST): the whole db lives in one key, with a version number to avoid lost updates ----
@@ -87,6 +87,11 @@ const av = u => (db.users[u] || {}).avt || 0;
 const setg = u => { const s = (db.users[u] || {}).set || {}; return { n: Object.assign({ msg: 1, post: 1, story: 1, req: 1 }, s.n || {}), priv: s.priv ? 1 : 0, noreq: s.noreq ? 1 : 0 }; };
 const canSee = (v, o) => v === o || !setg(o).priv || isF(v, o);
 const isFol = (a, b) => db.follows.some(f => f[0] === a && f[1] === b);
+// ---- صندوق الأسرار: الهوية تتخزن سراً بالسيرفر (s.un) وما تنرسل لأي مستخدم أبداً ----
+const SEC_LIMIT = +process.env.SECRET_REPORT_LIMIT || 5;
+const secLive = s => !s.hidden && (!s.exp || Date.now() < s.exp);
+const secOK = (v, s) => s.un === v || s.aud === 'public' || (s.aud === 'friends' && isF(v, s.un)) || (s.aud === 'followers' && (isFol(v, s.un) || isF(v, s.un)));
+const secOut = (s, me) => ({ id: s.id, time: s.time, exp: s.exp || 0, aud: s.aud, text: s.text, m: s.m || '', k: s.k || '', likes: s.likes.length, liked: s.likes.includes(me), cc: s.cm.filter(c => !c.hidden).length, mine: s.un === me });
 const storyOK = (s, v) => {
   if (s.un === v) return true; if (!canSee(v, s.un)) return false;
   if (s.vis === 'friends') return isF(v, s.un);
@@ -116,6 +121,7 @@ function rename(o, n) {
   db.stories.forEach(s => { if (s.un === o) s.un = n; s.likes = lk(s.likes); });
   db.posts.forEach(p => { if (p.un === o) p.un = n; p.likes = lk(p.likes); p.cm.forEach(c => { if (c.un === o) c.un = n; }); });
   (db.notifs || []).forEach(x => { if (x.to === o) x.to = n; if (x.from === o) x.from = n; });
+  db.secrets.forEach(s => { if (s.un === o) s.un = n; s.likes = lk(s.likes); s.rep = lk(s.rep); s.cm.forEach(c => { if (c.un === o) c.un = n; c.rep = lk(c.rep); }); if (s.anon[o]) { s.anon[n] = s.anon[o]; delete s.anon[o]; } });
 }
 const login = (res, un) => { const t = crypto.randomBytes(24).toString('hex'); db.tokens[t] = un; save(); send(res, 200, { token: t }); };
 
@@ -441,6 +447,65 @@ function route(req, res, P, u, b) {
     return send(res, 200, { unread: l.filter(x => !x.r).length, list: l.map(x => ({ id: x.id, type: x.type, un: x.from, name: nm(x.from), av: av(x.from), text: x.text, time: x.time, r: x.r })) });
   }
   if (K === 'POST /api/notifs/read') { (db.notifs || []).forEach(x => { if (x.to === me) x.r = 1; }); save(); return ok(); }
+  // ===== صندوق الأسرار =====
+  const secGet = id => db.secrets.find(x => x.id === S(id) && secLive(x) && secOK(me, x));
+  if (K === 'GET /api/secrets') {
+    const now = Date.now(), dead = db.secrets.filter(s => s.exp && now > s.exp);
+    if (dead.length) { dead.forEach(s => s.m && rmMedia(s.m)); db.secrets = db.secrets.filter(s => !(s.exp && now > s.exp)); save(); }
+    return send(res, 200, db.secrets.filter(s => secLive(s) && secOK(me, s)).reverse().slice(0, 60).map(s => secOut(s, me)));
+  }
+  if (K === 'POST /api/secrets') {
+    const text = S(b.text).slice(0, 500), md = b.media && owned(me, b.media);
+    const aud = ['friends', 'followers', 'public'].includes(b.aud) ? b.aud : 'friends', hrs = [6, 12, 24, 0].includes(+b.hrs) ? +b.hrs : 24;
+    if (b.media && !md) return err(res, 'الملف غير صالح');
+    if (!text && !md) return err(res, 'اكتب سر أو أضف ملف');
+    if (db.secrets.some(s => s.un === me && Date.now() - s.time < 6e4)) return err(res, 'انتظر دقيقة قبل ما تنشر سر ثاني', 429);
+    db.secrets.push({ id: rid(), un: me, text, m: md ? S(b.media) : '', k: md ? md.kind : '', time: Date.now(), exp: hrs ? Date.now() + hrs * 36e5 : 0, aud, likes: [], cm: [], rep: [], anon: {}, nn: 0 });
+    save(); return ok();
+  }
+  if (K === 'POST /api/secrets/delete') {
+    const s = db.secrets.find(x => x.id === S(b.id) && x.un === me);
+    if (s) { if (s.m) rmMedia(s.m); db.secrets = db.secrets.filter(x => x !== s); save(); }
+    return ok();
+  }
+  if (K === 'POST /api/secrets/like') {
+    const s = secGet(b.id); if (!s) return err(res, 'السر غير موجود', 404);
+    const i = s.likes.indexOf(me); if (i < 0) s.likes.push(me); else s.likes.splice(i, 1);
+    save(); return send(res, 200, { liked: i < 0, likes: s.likes.length });
+  }
+  if (K === 'GET /api/secrets/comments') {
+    const s = secGet(u.searchParams.get('id')); if (!s) return err(res, 'السر غير موجود', 404);
+    return send(res, 200, s.cm.filter(c => !c.hidden).map(c => ({ id: c.id, parent: c.parent || '', who: c.un === s.un ? 'صاحب السر' : 'مستخدم ' + s.anon[c.un], op: c.un === s.un, text: c.text, time: c.time, mine: c.un === me, del: c.un === me || s.un === me })));
+  }
+  if (K === 'POST /api/secrets/comments') {
+    const s = secGet(b.id), text = S(b.text).slice(0, 300);
+    if (!s) return err(res, 'السر غير موجود', 404);
+    if (!text) return err(res, 'اكتب تعليق');
+    if (s.cm.length >= 500) return err(res, 'التعليقات وصلت للحد الأعلى');
+    let parent = '';
+    if (b.parent) { const pc = s.cm.find(c => c.id === S(b.parent) && !c.hidden); if (!pc) return err(res, 'التعليق غير موجود', 404); parent = pc.parent || pc.id; }
+    if (me !== s.un && !s.anon[me]) s.anon[me] = ++s.nn;
+    s.cm.push({ id: rid(), un: me, text, time: Date.now(), parent, rep: [] });
+    save(); return ok();
+  }
+  if (K === 'POST /api/secrets/comments/delete') {
+    const s = secGet(b.id); if (!s) return err(res, 'السر غير موجود', 404);
+    const c = s.cm.find(x => x.id === S(b.cid));
+    if (c && (c.un === me || s.un === me)) { s.cm = s.cm.filter(x => x !== c && x.parent !== c.id); save(); }
+    return ok();
+  }
+  if (K === 'POST /api/secrets/report') {
+    const s = secGet(b.id); if (!s) return err(res, 'السر غير موجود', 404);
+    if (b.cid) {
+      const c = s.cm.find(x => x.id === S(b.cid)); if (!c) return err(res, 'التعليق غير موجود', 404);
+      if (c.un === me) return err(res, 'هذا تعليقك أنت');
+      c.rep = c.rep || []; if (!c.rep.includes(me)) c.rep.push(me); if (c.rep.length >= SEC_LIMIT) c.hidden = 1;
+    } else {
+      if (s.un === me) return err(res, 'هذا سرك أنت');
+      if (!s.rep.includes(me)) s.rep.push(me); if (s.rep.length >= SEC_LIMIT) s.hidden = 1;
+    }
+    save(); return ok();
+  }
   err(res, 'not found', 404);
 }
 
