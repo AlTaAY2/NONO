@@ -592,7 +592,14 @@ function route(req, res, P, u, b) {
   if (K === 'POST /api/news/comments/delete') {
     const n = nwGet(b.id); if (!n) return err(res, 'الخبر غير موجود', 404);
     n.cm = n.cm.filter(c => !(c.id === S(b.cid) && c.un === me)); save(); return ok();
-  }  err(res, 'not found', 404);
+  }  // منشوراتي: كل منشوراتي (عام + أخبار منطقتي) + أسراري (تبين لي أنا بس)
+  if (K === 'GET /api/mine') {
+    const now = Date.now();
+    const ps = db.posts.filter(p => p.un === me).map(p => Object.assign(pv(p, me), { kind: 'p' }));
+    const ss = db.secrets.filter(x => x.un === me && (!x.exp || now < x.exp)).map(x => Object.assign(secOut(x, me), { kind: 's', hidden: !!x.hidden }));
+    return send(res, 200, { items: ps.concat(ss).sort((x, y) => y.time - x.time).slice(0, 200) });
+  }
+  err(res, 'not found', 404);
 }
 
 module.exports = async (req, res) => {
