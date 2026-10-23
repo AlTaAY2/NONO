@@ -2,7 +2,7 @@ const crypto = require('crypto');
 const { put, del } = require('@vercel/blob');
 const RU = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL, RT = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
 const fresh = () => ({ users: {}, tokens: {}, friends: [], reqs: [], msgs: [], stories: [], posts: [], follows: [], media: {}, fails: {}, codes: {}, secrets: [] });
-let db = fresh(), ver = '0', dirty = false, pendDel = [], pendMail = [];
+let db = fresh(), ver = '0', dirty = false, pendDel = [], pendMail = [], pre = null, wantNews = '';
 const save = () => { dirty = true; };
 // ---- Redis (Upstash REST): the whole db lives in one key, with a version number to avoid lost updates ----
 const FB_KEY = process.env.FIREBASE_API_KEY || 'AIzaSyD0RHTyMNl9wQ3AzXCjyRfWVFmt9GKSKl8';
@@ -17,6 +17,36 @@ async function fbPhone(idToken) {
   return u.phoneNumber;
 }
 const dbErr = m => Object.assign(new Error(m), { user: 1 });
+// ---- verified accounts: OFFICIAL_USER (the NONO account) + VERIFIED_USERS (comma separated usernames) ----
+const VER = new Set([process.env.OFFICIAL_USER, ...String(process.env.VERIFIED_USERS || '').split(',')].map(x => String(x || '').trim().toLowerCase().replace(/^@/, '')).filter(Boolean));
+const isV = u => VER.has(u);
+// ---- story text styling ----
+const FONTS = ['Cairo', 'Tajawal', 'Amiri', 'Lalezar', 'Reem Kufi', 'Aref Ruqaa', 'Pacifico', 'Bebas Neue', 'Lobster', 'Playfair Display', 'Oswald'];
+const stIn = o => {
+  if (!o || typeof o !== 'object') return null;
+  const n = (v, a, b, d) => { v = +v; return isFinite(v) ? Math.min(b, Math.max(a, v)) : d; };
+  return { x: n(o.x, 0, 100, 50), y: n(o.y, 0, 100, 50), sz: n(o.sz, 3, 20, 8), c: /^#[0-9a-f]{6}$/i.test(String(o.c)) ? String(o.c) : '#ffffff', f: FONTS.includes(String(o.f)) ? String(o.f) : '', bg: o.bg === 1 ? 1 : 0 };
+};
+// ---- regional news (NewsData.io: NEWS_API_KEY) cached 30 min per country ----
+const NEWS_TTL = 30 * 60 * 1000;
+const ARAB = new Set(['iq', 'sa', 'ae', 'eg', 'kw', 'qa', 'bh', 'om', 'jo', 'lb', 'sy', 'ye', 'ly', 'tn', 'dz', 'ma', 'sd', 'ps']);
+async function fetchNews(cc) {
+  const key = process.env.NEWS_API_KEY;
+  if (!key) throw dbErr('الأخبار غير مفعّلة بعد: أضف NEWS_API_KEY بإعدادات فيرسل ثم Redeploy');
+  let r, j;
+  try {
+    r = await fetch('https://newsdata.io/api/1/latest?apikey=' + encodeURIComponent(key) + '&country=' + cc + (ARAB.has(cc) ? '&language=ar' : '') + '&removeduplicate=1');
+    j = await r.json();
+  } catch (e) { throw dbErr('ما كدرت أتصل بمزود الأخبار: ' + e.message); }
+  if (!r.ok || !Array.isArray(j.results)) throw dbErr('مزود الأخبار رفض الطلب: ' + ((j && j.results && j.results.message) || (j && j.message) || r.status));
+  const clean = t => String(t || '').replace(/\s+/g, ' ').trim();
+  return j.results.map(x => {
+    const url = /^https?:\/\//.test(x.link || '') ? x.link : '', title = clean(x.title).slice(0, 160);
+    let sum = clean(x.description); if (/ONLY AVAILABLE/i.test(sum)) sum = '';
+    const t = Date.parse(String(x.pubDate || '').replace(' ', 'T') + 'Z');
+    return { id: crypto.createHash('sha1').update(url || title).digest('hex').slice(0, 12), title, summary: sum.slice(0, 220), src: clean(x.source_name || x.source_id).slice(0, 40), url, time: isFinite(t) ? t : Date.now() };
+  }).filter(a => a.title && a.url);
+}
 // ---- email codes (Brevo transactional API: BREVO_API_KEY + MAIL_FROM = a sender you verified in Brevo) ----
 async function sendMail(m) {
   const key = process.env.BREVO_API_KEY, from = process.env.MAIL_FROM;
@@ -100,10 +130,10 @@ const storyOK = (s, v) => {
   return true;
 };
 const cnt = u => ({ posts: db.posts.filter(p => p.un === u).length, friends: db.friends.filter(f => f[0] === u || f[1] === u).length, followers: db.follows.filter(f => f[1] === u).length, following: db.follows.filter(f => f[0] === u).length });
-const pv = (p, me) => ({ id: p.id, un: p.un, name: nm(p.un), av: av(p.un), text: p.text, img: !!(p.img || p.m), time: p.time, likes: p.likes.length, liked: p.likes.includes(me), cc: p.cm.length, saved: ((db.users[me] || {}).saves || []).includes(p.id), me: p.un === me });
-const person = (u, me) => ({ un: u, name: nm(u), av: av(u), rel: rel(me, u), following: isFol(me, u) });
+const pv = (p, me) => ({ id: p.id, un: p.un, name: nm(p.un), av: av(p.un), v: isV(p.un) ? 1 : 0, text: p.text, img: !!(p.img || p.m), time: p.time, likes: p.likes.length, liked: p.likes.includes(me), cc: p.cm.length, saved: ((db.users[me] || {}).saves || []).includes(p.id), me: p.un === me });
+const person = (u, me) => ({ un: u, name: nm(u), av: av(u), v: isV(u) ? 1 : 0, rel: rel(me, u), following: isFol(me, u) });
 const imgOK = s => /^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(s) && s.length < 5e5;
-const sv = (s, me) => ({ id: s.id, un: s.un, name: nm(s.un), av: av(s.un), text: s.text || (s.m ? (s.k === 'video' ? '🎥 فيديو' : '📷 صورة') : ''), cap: s.text, m: s.m || '', k: s.k || '', color: s.color, time: s.time, me: s.un === me, likes: (s.likes || []).length, liked: (s.likes || []).includes(me), views: s.un === me ? (s.views || []).length : 0 });
+const sv = (s, me) => ({ id: s.id, un: s.un, name: nm(s.un), av: av(s.un), v: isV(s.un) ? 1 : 0, st: s.st || null, text: s.text || (s.m ? (s.k === 'video' ? '🎥 فيديو' : '📷 صورة') : ''), cap: s.text, m: s.m || '', k: s.k || '', color: s.color, time: s.time, me: s.un === me, likes: (s.likes || []).length, liked: (s.likes || []).includes(me), views: s.un === me ? (s.views || []).length : 0 });
 const notify = (to, type, from, text) => {
   if (to === from || !db.users[to] || !setg(to).n[type]) return;
   db.notifs = db.notifs || [];
@@ -269,7 +299,7 @@ function route(req, res, P, u, b) {
     const vis = ['followers', 'friends', 'only'].includes(S(b.vis)) ? S(b.vis) : 'followers';
     const to = vis === 'only' ? (Array.isArray(b.to) ? b.to : []).map(S).filter(x => db.users[x] && x !== me).slice(0, 100) : [];
     if (vis === 'only' && !to.length) return err(res, 'اختر شخص واحد على الأقل');
-    db.stories.push({ id: crypto.randomBytes(6).toString('hex'), un: me, text, color, m: md ? b.media : '', k: md ? md.kind : '', time: Date.now(), vis, to });
+    db.stories.push({ id: crypto.randomBytes(6).toString('hex'), un: me, text, color, st: text ? stIn(b.st) : null, m: md ? b.media : '', k: md ? md.kind : '', time: Date.now(), vis, to });
     prune(); return send(res, 200, { ok: 1 });
   }
   if (K === 'POST /api/stories/delete') { const dx = db.stories.find(s => s.id === b.id && s.un === me); if (dx && dx.m) rmMedia(dx.m); db.stories = db.stories.filter(s => !(s.id === b.id && s.un === me)); save(); return send(res, 200, { ok: 1 }); }
@@ -412,7 +442,7 @@ function route(req, res, P, u, b) {
   if (K === 'GET /api/saved') return send(res, 200, (m.saves || []).map(id => db.posts.find(p => p.id === id)).filter(p => p && canSee(me, p.un)).reverse().map(p => pv(p, me)));
   if (K === 'GET /api/comments') {
     const p = vp(u.searchParams.get('id')); if (!p) return err(res, 'المنشور غير موجود', 404);
-    return send(res, 200, p.cm.map(c => ({ id: c.id, un: c.un, name: nm(c.un), av: av(c.un), text: c.text, time: c.time, del: c.un === me || p.un === me })));
+    return send(res, 200, p.cm.map(c => ({ id: c.id, un: c.un, name: nm(c.un), av: av(c.un), v: isV(c.un) ? 1 : 0, text: c.text, time: c.time, del: c.un === me || p.un === me })));
   }
   if (K === 'POST /api/comments') {
     const p = vp(b.id), text = S(b.text).slice(0, 300);
@@ -506,7 +536,54 @@ function route(req, res, P, u, b) {
     }
     save(); return ok();
   }
-  err(res, 'not found', 404);
+
+  // ===== عنصر مفرد: منشور / سر =====
+  if (K === 'GET /api/post') { const p = vp(u.searchParams.get('id')); return p ? send(res, 200, pv(p, me)) : err(res, 'المنشور غير موجود', 404); }
+  if (K === 'GET /api/secret') { const s = secGet(u.searchParams.get('id')); return s ? send(res, 200, secOut(s, me)) : err(res, 'السر غير موجود', 404); }
+  // ===== أخبار منطقتي =====
+  const nwOut = (n, me) => ({ id: n.id, title: n.title, summary: n.summary, src: n.src, url: n.url, time: n.time, likes: n.likes.length, liked: n.likes.includes(me), cc: n.cm.length });
+  const nwGet = id => (db.news || {})[S(id)];
+  if (K === 'GET /api/news') {
+    const q = S(u.searchParams.get('cc')).toLowerCase();
+    const cc = /^[a-z]{2}$/.test(q) ? q : (/^[a-z]{2}$/i.test(S(req.headers['x-vercel-ip-country'])) ? S(req.headers['x-vercel-ip-country']).toLowerCase() : 'iq');
+    db.news = db.news || {}; db.newsCache = db.newsCache || {};
+    const now = Date.now(); let c = db.newsCache[cc];
+    if (!c || (now - c.t > NEWS_TTL && (!c.ft || now - c.ft > 3e5))) {
+      if (!pre || pre.cc !== cc) { wantNews = cc; return send(res, 200, { cc, items: [] }); }
+      if (pre.items) {
+        const ids = [];
+        pre.items.forEach(a => { const o = db.news[a.id]; db.news[a.id] = Object.assign(a, { likes: o ? o.likes : [], cm: o ? o.cm : [] }); ids.push(a.id); });
+        (c ? c.ids : []).forEach(id => { if (!ids.includes(id) && db.news[id] && now - db.news[id].time < 2592e5) ids.push(id); });
+        c = db.newsCache[cc] = { t: now, ids: ids.slice(0, 40) };
+        for (const k in db.news) if (now - db.news[k].time > 12096e5 && !db.news[k].cm.length) delete db.news[k];
+        save();
+      } else if (c) { c.ft = now; save(); }
+      else return err(res, pre.error || 'تعذر جلب الأخبار', 503);
+    }
+    let city = ''; try { city = decodeURIComponent(S(req.headers['x-vercel-ip-city'])); } catch {}
+    return send(res, 200, { cc, city, items: c.ids.map(id => db.news[id]).filter(Boolean).sort((a, b) => b.time - a.time).map(n => nwOut(n, me)) });
+  }
+  if (K === 'GET /api/news/item') { const n = nwGet(u.searchParams.get('id')); return n ? send(res, 200, nwOut(n, me)) : err(res, 'الخبر غير موجود', 404); }
+  if (K === 'POST /api/news/like') {
+    const n = nwGet(b.id); if (!n) return err(res, 'الخبر غير موجود', 404);
+    const i = n.likes.indexOf(me); if (i >= 0) n.likes.splice(i, 1); else n.likes.push(me);
+    save(); return send(res, 200, { liked: i < 0, likes: n.likes.length });
+  }
+  if (K === 'GET /api/news/comments') {
+    const n = nwGet(u.searchParams.get('id')); if (!n) return err(res, 'الخبر غير موجود', 404);
+    return send(res, 200, n.cm.map(c => ({ id: c.id, un: c.un, name: nm(c.un), av: av(c.un), v: isV(c.un) ? 1 : 0, text: c.text, time: c.time, del: c.un === me })));
+  }
+  if (K === 'POST /api/news/comments') {
+    const n = nwGet(b.id), text = S(b.text).slice(0, 300);
+    if (!n) return err(res, 'الخبر غير موجود', 404);
+    if (!text) return err(res, 'اكتب تعليق');
+    if (n.cm.length >= 300) return err(res, 'التعليقات وصلت للحد الأعلى');
+    n.cm.push({ id: rid(), un: me, text, time: Date.now() }); save(); return ok();
+  }
+  if (K === 'POST /api/news/comments/delete') {
+    const n = nwGet(b.id); if (!n) return err(res, 'الخبر غير موجود', 404);
+    n.cm = n.cm.filter(c => !(c.id === S(b.cid) && c.un === me)); save(); return ok();
+  }  err(res, 'not found', 404);
 }
 
 module.exports = async (req, res) => {
@@ -521,10 +598,12 @@ module.exports = async (req, res) => {
       try { b.fbPhone = await fbPhone(String(b.idToken)); }
       catch (e) { const r = mkRes(); err(r, e.message, e.code || 503); return fin(res, r); }
     }
+    pre = null;
     for (let i = 0; i < 6; i++) {
       await load();
-      const r = mkRes(); pendDel = []; pendMail = [];
+      const r = mkRes(); pendDel = []; pendMail = []; wantNews = '';
       try { route(req, r, u.pathname, u, b); } catch (e) { console.error(e); r.h = {}; err(r, 'خطأ داخلي بالسيرفر: ' + (e && e.message || e), 500); dirty = false; }
+      if (wantNews) { const cc = wantNews; wantNews = ''; try { pre = { cc, items: await fetchNews(cc) }; } catch (e) { pre = { cc, error: e.message }; } continue; }
       const pd = pendDel, pm = pendMail;
       if (dirty && !(await commit())) continue;
       if (pm.length) { try { await Promise.all(pm.map(sendMail)); } catch (e) { const r2 = mkRes(); err(r2, e.message, 502); return fin(res, r2); } }
