@@ -66,8 +66,18 @@ async function rcmd(p, body) {
   if (!r.ok || j.error) throw dbErr('خطأ من قاعدة البيانات: ' + (j.error || r.status));
   return j;
 }
-async function load() { const j = await rcmd('/pipeline', [['GET', 'nono:db'], ['GET', 'nono:ver']]); db = Object.assign(fresh(), j[0].result ? JSON.parse(j[0].result) : {}); if (j[0].error || j[1].error) throw dbErr('خطأ من قاعدة البيانات: ' + (j[0].error || j[1].error)); ver = j[1].result || '0'; dirty = false; }
-async function commit() { const v = ver, d = JSON.stringify(db); const j = await rcmd('', ['EVAL', "if (redis.call('GET',KEYS[2]) or '0')==ARGV[2] then redis.call('SET',KEYS[1],ARGV[1]) redis.call('INCR',KEYS[2]) return 1 end return 0", '2', 'nono:db', 'nono:ver', d, v]); return j.result === 1; }
+let cStr = null, cVer = null;
+async function load() {
+  const jv = await rcmd('/pipeline', [['GET', 'nono:ver']]);
+  if (jv[0].error) throw dbErr('خطأ من قاعدة البيانات: ' + jv[0].error);
+  const v0 = jv[0].result || '0';
+  if (cStr !== null && cVer === v0) { db = Object.assign(fresh(), JSON.parse(cStr)); ver = v0; dirty = false; return; }
+  const j = await rcmd('/pipeline', [['GET', 'nono:db'], ['GET', 'nono:ver']]);
+  if (j[0].error || j[1].error) throw dbErr('خطأ من قاعدة البيانات: ' + (j[0].error || j[1].error));
+  cStr = j[0].result || null; ver = j[1].result || '0'; cVer = ver;
+  db = Object.assign(fresh(), cStr ? JSON.parse(cStr) : {}); dirty = false;
+}
+async function commit() { const v = ver, d = JSON.stringify(db); const j = await rcmd('', ['EVAL', "if (redis.call('GET',KEYS[2]) or '0')==ARGV[2] then redis.call('SET',KEYS[1],ARGV[1]) redis.call('INCR',KEYS[2]) return 1 end return 0", '2', 'nono:db', 'nono:ver', d, v]); const ok = j.result === 1; if (ok) { cStr = d; cVer = String(Number(v) + 1); } return ok; }
 const mkRes = () => { const r = { statusCode: 200, h: {}, body: '', headersSent: false, setHeader(k, v) { r.h[k] = v; }, writeHead(c, h) { r.statusCode = c; Object.assign(r.h, h); }, end(b) { r.body = b === undefined ? '' : b; } }; return r; };
 const fin = (res, r) => { res.statusCode = r.statusCode; for (const k in r.h) res.setHeader(k, r.h[k]); res.end(r.body); };
 const rbuf = async req => { if (Buffer.isBuffer(req.body)) return req.body; if (typeof req.body === 'string') return Buffer.from(req.body); if (req.body && typeof req.body === 'object') return Buffer.from(JSON.stringify(req.body)); const c = []; for await (const x of req) c.push(x); return Buffer.concat(c); };
@@ -256,6 +266,11 @@ function route(req, res, P, u, b) {
   const m = tk && db.users[db.tokens[tk]];
   if (!m) return err(res, 'سجّل دخول', 401);
   const me = m.un;
+  if (K === 'GET /api/sync') {
+    const o = {};
+    for (const [k, p] of [['chats', '/api/chats'], ['stories', '/api/stories'], ['reqs', '/api/reqs'], ['notifs', '/api/notifs'], ['me', '/api/me']]) { const r = mkRes(); route({ method: 'GET', headers: req.headers }, r, p, u, {}); o[k] = JSON.parse(r.body); }
+    return send(res, 200, o);
+  }
   if (K === 'GET /api/me') return send(res, 200, { un: me, name: m.name, phone: m.phone || '', email: m.email || '', emailV: m.emailV ? 1 : 0, bio: m.bio || '', av: m.avt || 0, set: setg(me), counts: cnt(me) });
   if (K === 'POST /api/me') {
     let nu = me;
@@ -342,7 +357,7 @@ function route(req, res, P, u, b) {
     const ms = db.msgs.filter(x => ((x.from === me && x.to === o) || (x.from === o && x.to === me)) && !(x.hid && x.hid.includes(me)));
     ms.forEach(x => { if (x.to === me && !x.r) { x.r = 1; ch = true; } });
     if (ch) save();
-    return send(res, 200, ms.slice(-200).map(x => ({ from: x.from, text: x.text, m: x.m || '', k: x.k || '', st: x.st || '', fn: x.fn || '', r: x.r ? 1 : 0, time: x.time })));
+    return send(res, 200, ms.filter(x => x.time > (+u.searchParams.get('after') || 0)).slice(-200).map(x => ({ from: x.from, text: x.text, m: x.m || '', k: x.k || '', st: x.st || '', fn: x.fn || '', r: x.r ? 1 : 0, time: x.time })));
   }
   if (K === 'POST /api/send') {
     const to = S(b.to), text = S(b.text).slice(0, 500);
@@ -351,7 +366,7 @@ function route(req, res, P, u, b) {
     if (!text && !md && !stk) return err(res, 'الرسالة فارغة');
     if (!isF(me, to)) return err(res, 'لازم يوافق على طلبك أول', 403);
     if ((db.blocks || []).some(x => (x[0] === me && x[1] === to) || (x[0] === to && x[1] === me))) return err(res, 'ما تكدر ترسل لهذا الشخص', 403);
-    db.msgs.push({ from: me, to, text, fn: md ? (md.name || '') : '', m: md ? b.media : '', k: md ? md.kind : '', st: stk, time: Date.now(), r: 0 }); save(); return send(res, 200, { ok: 1 });
+    const mt = Date.now(); db.msgs.push({ from: me, to, text, fn: md ? (md.name || '') : '', m: md ? b.media : '', k: md ? md.kind : '', st: stk, time: mt, r: 0 }); save(); return send(res, 200, { ok: 1, time: mt });
   }
   const ok = () => send(res, 200, { ok: 1 });
   const vp = id => { const p = db.posts.find(x => x.id === S(id)); return p && canSee(me, p.un) ? p : null; };
