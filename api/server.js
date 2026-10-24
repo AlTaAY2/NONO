@@ -87,7 +87,8 @@ const live = s => Date.now() - s.time < 864e5;
 const MT = { 'image/jpeg': 'image', 'image/png': 'image', 'image/webp': 'image', 'video/mp4': 'video', 'video/quicktime': 'video', 'video/webm': 'video', 'audio/mp4': 'audio', 'audio/x-m4a': 'audio', 'audio/aac': 'audio', 'audio/mpeg': 'audio', 'audio/webm': 'audio', 'audio/ogg': 'audio', 'audio/wav': 'audio', 'application/pdf': 'file', 'application/msword': 'file', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'file', 'application/vnd.ms-excel': 'file', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'file', 'application/vnd.ms-powerpoint': 'file', 'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'file', 'text/plain': 'file', 'application/zip': 'file' };
 const owned = (me, id) => { const m = db.media[S(id)]; return m && m.un === me ? m : null; };
 const rmMedia = id => { const m = db.media[id]; if (!m) return; delete db.media[id]; if (m.url) pendDel.push(m.url); };
-const prune = () => { db.stories.filter(s => !live(s)).forEach(s => s.m && rmMedia(s.m)); db.stories = db.stories.filter(live); save(); };
+const rmStory = s => { s.m && rmMedia(s.m); (s.lm || []).forEach(rmMedia); };
+const prune = () => { db.stories.filter(s => !live(s)).forEach(rmStory); db.stories = db.stories.filter(live); save(); };
 const send = (res, c, o) => { res.statusCode = c; res.setHeader('Content-Type', 'application/json; charset=utf-8'); res.end(JSON.stringify(o)); };
 const err = (res, m, c = 400) => send(res, c, { error: m });
 const phoneOf = s => {
@@ -143,7 +144,7 @@ const cnt = u => ({ posts: db.posts.filter(p => p.un === u).length, friends: db.
 const pv = (p, me) => ({ id: p.id, un: p.un, name: nm(p.un), av: av(p.un), v: isV(p.un) ? 1 : 0, text: p.text, img: !!(p.img || p.m), time: p.time, likes: p.likes.length, liked: p.likes.includes(me), cc: p.cm.length, saved: ((db.users[me] || {}).saves || []).includes(p.id), me: p.un === me, cat: p.cat || 'pub' });
 const person = (u, me) => ({ un: u, name: nm(u), av: av(u), v: isV(u) ? 1 : 0, rel: rel(me, u), following: isFol(me, u) });
 const imgOK = s => /^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(s) && s.length < 5e5;
-const sv = (s, me) => ({ id: s.id, un: s.un, name: nm(s.un), av: av(s.un), v: isV(s.un) ? 1 : 0, st: s.st || null, text: s.text || (s.m ? (s.k === 'video' ? '🎥 فيديو' : '📷 صورة') : ''), cap: s.text, m: s.m || '', k: s.k || '', color: s.color, time: s.time, me: s.un === me, likes: (s.likes || []).length, liked: (s.likes || []).includes(me), views: s.un === me ? (s.views || []).length : 0 });
+const sv = (s, me) => ({ id: s.id, un: s.un, name: nm(s.un), av: av(s.un), v: isV(s.un) ? 1 : 0, st: s.st || null, lay: s.lay || null, text: s.text || (s.lay ? '📷 قصة' : s.m ? (s.k === 'video' ? '🎥 فيديو' : '📷 صورة') : ''), cap: s.text, m: s.m || '', k: s.k || '', color: s.color, time: s.time, me: s.un === me, likes: (s.likes || []).length, liked: (s.likes || []).includes(me), views: s.un === me ? (s.views || []).length : 0 });
 const notify = (to, type, from, text) => {
   if (to === from || !db.users[to] || !setg(to).n[type]) return;
   db.notifs = db.notifs || [];
@@ -320,16 +321,30 @@ function route(req, res, P, u, b) {
     const text = S(b.text).slice(0, 200);
     const md = b.media && owned(me, b.media);
     if (b.media && !md) return err(res, 'الملف غير صالح');
-    if (!text && !md) return err(res, 'اكتب شي أو أضف صورة');
+    const N = (v, a, z, d) => { v = +v; return isFinite(v) ? Math.max(a, Math.min(z, v)) : d; };
+    let lay = null, lm = [];
+    if (Array.isArray(b.lay) && b.lay.length) {
+      lay = [];
+      for (const l of b.lay.slice(0, 14)) {
+        if (!l || typeof l !== 'object') continue;
+        const o = { t: ['m', 't', 'e'].includes(l.t) ? l.t : 't', x: N(l.x, -50, 150, 50), y: N(l.y, -50, 150, 50), s: N(l.s, 0.1, 12, 1), r: N(l.r, -3600, 3600, 0) };
+        if (o.t === 'm') { const mm = owned(me, l.id); if (!mm) continue; o.id = S(l.id); o.k = mm.kind === 'video' ? 'video' : 'image'; o.cr = (Array.isArray(l.cr) ? l.cr : [0, 0, 0, 0]).slice(0, 4).map(v => N(v, 0, 90, 0)); o.w = N(l.w, 5, 200, 70); o.a = N(l.a, 0.2, 5, 1); lm.push(o.id); }
+        else if (o.t === 'e') { o.e = S(l.e).slice(0, 8); if (!o.e) continue; }
+        else { o.text = S(l.text).slice(0, 200); if (!o.text) continue; o.f = S(l.f).replace(/[^\w \u0600-\u06FF-]/g, '').slice(0, 30); o.c = /^#[0-9a-f]{6}$/i.test(S(l.c)) ? S(l.c) : '#ffffff'; o.bg = /^#[0-9a-f]{6}$/i.test(S(l.bg)) ? S(l.bg) : ''; o.sz = N(l.sz, 3, 30, 8); }
+        lay.push(o);
+      }
+      if (!lay.length) lay = null;
+    }
+    if (!text && !md && !lay) return err(res, 'اكتب شي أو أضف صورة');
     const color = /^#[0-9a-f]{6}$/i.test(S(b.color)) ? S(b.color) : '#E11D32';
     const vis = ['followers', 'friends', 'only'].includes(S(b.vis)) ? S(b.vis) : 'followers';
     const to = vis === 'only' ? (Array.isArray(b.to) ? b.to : []).map(S).filter(x => db.users[x] && x !== me).slice(0, 100) : [];
     if (vis === 'only' && !to.length) return err(res, 'اختر شخص واحد على الأقل');
-    const sObj = { id: crypto.randomBytes(6).toString('hex'), un: me, text, color, st: text ? stIn(b.st) : null, m: md ? b.media : '', k: md ? md.kind : '', time: Date.now(), vis, to };
+    const sObj = { id: crypto.randomBytes(6).toString('hex'), un: me, text, color, st: text ? stIn(b.st) : null, m: md ? b.media : '', k: md ? md.kind : '', lay, lm, time: Date.now(), vis, to };
     db.stories.push(sObj); notifyMentions(text, me, 'بقصة', u => storyOK(sObj, u));
     prune(); return send(res, 200, { ok: 1 });
   }
-  if (K === 'POST /api/stories/delete') { const dx = db.stories.find(s => s.id === b.id && s.un === me); if (dx && dx.m) rmMedia(dx.m); db.stories = db.stories.filter(s => !(s.id === b.id && s.un === me)); save(); return send(res, 200, { ok: 1 }); }
+  if (K === 'POST /api/stories/delete') { const dx = db.stories.find(s => s.id === b.id && s.un === me); if (dx) rmStory(dx); db.stories = db.stories.filter(s => !(s.id === b.id && s.un === me)); save(); return send(res, 200, { ok: 1 }); }
   if (K === 'GET /api/reqs') return send(res, 200, {
     in: db.reqs.filter(r => r.to === me).map(r => ({ un: r.from, name: nm(r.from), av: av(r.from) })),
     out: db.reqs.filter(r => r.from === me).map(r => ({ un: r.to, name: nm(r.to), av: av(r.to) }))
