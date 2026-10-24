@@ -353,6 +353,24 @@ function route(req, res, P, u, b) {
   }
   if (K === 'POST /api/req/reject') { const i = hasReq(S(b.from), me); if (i >= 0) db.reqs.splice(i, 1); save(); return send(res, 200, { ok: 1 }); }
   if (K === 'POST /api/req/cancel') { const i = hasReq(me, S(b.to)); if (i >= 0) db.reqs.splice(i, 1); save(); return send(res, 200, { ok: 1 }); }
+  // ===== تخصيص تبويبات المحادثات + بحث الرسائل + الوسائط المشتركة =====
+  if (K === 'GET /api/ctabs') return send(res, 200, { tabs: (db.users[me] || {}).ctabs || null });
+  if (K === 'POST /api/ctabs') {
+    const u0 = db.users[me]; if (!u0) return err(res, 'خطأ');
+    u0.ctabs = (Array.isArray(b.tabs) ? b.tabs.slice(0, 12) : []).map(t => ({ id: S(t.id).replace(/[^a-z0-9]/gi, '').slice(0, 12), k: ['all', 'p', 'g', 'c'].includes(S(t.k)) ? S(t.k) : 'c', name: S(t.name).trim().slice(0, 20), h: t.h ? 1 : 0, m: Array.isArray(t.m) ? t.m.map(S).slice(0, 200) : [] })).filter(t => t.id && (t.k !== 'c' || t.name));
+    save(); return send(res, 200, { ok: 1 });
+  }
+  if (K === 'GET /api/msgsearch') {
+    const q = S(u.searchParams.get('q')).trim().toLowerCase(); if (q.length < 2) return send(res, 200, []);
+    const mineM = x => !(x.hid && x.hid.includes(me)) && (x.gr ? (GRP(x.gr) && GRP(x.gr).members.includes(me)) : ((x.from === me && isF(me, x.to)) || (x.to === me && isF(me, x.from))));
+    return send(res, 200, db.msgs.filter(x => x.text && x.text.toLowerCase().includes(q) && mineM(x)).slice(-80).reverse().slice(0, 30).map(x => { const key = x.gr || (x.from === me ? x.to : x.from); return { un: key, g: x.gr ? 1 : 0, name: x.gr ? GRP(x.gr).name : nm(key), text: x.text.slice(0, 100), time: x.time, from: x.from === me ? 'أنت' : nm(x.from) }; }));
+  }
+  if (K === 'GET /api/chatmedia') {
+    const o = S(u.searchParams.get('with')), g = GRP(o); let ms;
+    if (g) { if (!g.members.includes(me)) return err(res, 'لست عضواً بهذه المجموعة', 403); ms = db.msgs.filter(x => x.gr === o); }
+    else { if (!isF(me, o)) return err(res, 'ما بينكم صداقة', 403); ms = db.msgs.filter(x => !x.gr && ((x.from === me && x.to === o) || (x.from === o && x.to === me))); }
+    return send(res, 200, ms.filter(x => x.m && !(x.hid && x.hid.includes(me))).slice(-300).reverse().map(x => ({ m: x.m, k: x.k, fn: x.fn || '', time: x.time })));
+  }
   if (K === 'GET /api/chats') {
     const out = db.friends.filter(f => f[0] === me || f[1] === me).map(f => {
       const o = f[0] === me ? f[1] : f[0];
