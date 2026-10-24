@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const { put, del } = require('@vercel/blob');
 const RU = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL, RT = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
-const fresh = () => ({ users: {}, tokens: {}, friends: [], reqs: [], msgs: [], stories: [], posts: [], follows: [], media: {}, fails: {}, codes: {}, secrets: [] });
+const fresh = () => ({ users: {}, tokens: {}, friends: [], reqs: [], msgs: [], stories: [], posts: [], follows: [], media: {}, fails: {}, codes: {}, secrets: [], groups: {} });
 let db = fresh(), ver = '0', dirty = false, pendDel = [], pendMail = [], pre = null, wantNews = '';
 const save = () => { dirty = true; };
 // ---- Redis (Upstash REST): the whole db lives in one key, with a version number to avoid lost updates ----
@@ -124,7 +124,7 @@ const hasReq = (a, b) => db.reqs.findIndex(r => r.from === a && r.to === b);
 const rel = (a, b) => isF(a, b) ? 'friend' : hasReq(a, b) >= 0 ? 'sent' : hasReq(b, a) >= 0 ? 'got' : 'none';
 const nm = u => (db.users[u] || {}).name || u;
 const av = u => (db.users[u] || {}).avt || 0;
-const setg = u => { const s = (db.users[u] || {}).set || {}; return { n: Object.assign({ msg: 1, post: 1, story: 1, req: 1 }, s.n || {}), priv: s.priv ? 1 : 0, noreq: s.noreq ? 1 : 0 }; };
+const setg = u => { const s = (db.users[u] || {}).set || {}; return { n: Object.assign({ msg: 1, post: 1, story: 1, req: 1, mention: 1 }, s.n || {}), priv: s.priv ? 1 : 0, noreq: s.noreq ? 1 : 0 }; };
 const canSee = (v, o) => v === o || !setg(o).priv || isF(v, o);
 const isFol = (a, b) => db.follows.some(f => f[0] === a && f[1] === b);
 // ---- صندوق الأسرار: الهوية تتخزن سراً بالسيرفر (s.un) وما تنرسل لأي مستخدم أبداً ----
@@ -150,6 +150,15 @@ const notify = (to, type, from, text) => {
   db.notifs.push({ id: crypto.randomBytes(4).toString('hex'), to, type, from, text, time: Date.now(), r: 0 });
   if (db.notifs.length > 2000) db.notifs = db.notifs.slice(-1500);
 };
+// ---- مجموعات + إشارات (@) + ردود ----
+const GRP = id => (db.groups || {})[id];
+const unTaken = x => !!db.users[x] || !!GRP(x);
+const mkMid = x => x.id || (x.from + '.' + x.time);
+const msgLabel = l => l.text || (l.ps ? '🔗 منشور' : l.st ? 'ملصق' : l.k === 'video' ? '🎥 فيديو' : l.k === 'audio' ? '🎤 رسالة صوتية' : l.k === 'file' ? '📎 ' + (l.fn || 'ملف') : '📷 صورة');
+const mOut = x => ({ id: mkMid(x), from: x.from, name: nm(x.from), text: x.text, m: x.m || '', k: x.k || '', st: x.st || '', fn: x.fn || '', r: x.gr ? ((x.rd || []).length ? 1 : 0) : (x.r ? 1 : 0), time: x.time, rp: x.rp || null, ps: x.ps || null });
+const blockedP = (a, b) => (db.blocks || []).some(x => (x[0] === a && x[1] === b) || (x[0] === b && x[1] === a));
+const mentionsOf = (text, me) => { const out = new Set(), re = /(^|[^a-z0-9_.@])@([a-z0-9_.]{3,20})/gi; let m; while ((m = re.exec(String(text || '')))) { const u = m[2].toLowerCase().replace(/\.+$/, ''); if (u !== me && db.users[u]) out.add(u); } return [...out].slice(0, 10); };
+const notifyMentions = (text, me, where, okf) => mentionsOf(text, me).forEach(u => { if (blockedP(me, u)) return; if (okf && !okf(u)) return; notify(u, 'mention', me, 'أشار إليك ' + where); });
 function rename(o, n) {
   const u = db.users[o]; delete db.users[o]; u.un = n; db.users[n] = u;
   for (const t in db.tokens) if (db.tokens[t] === o) db.tokens[t] = n;
@@ -158,6 +167,8 @@ function rename(o, n) {
   db.reqs.forEach(r => { if (r.from === o) r.from = n; if (r.to === o) r.to = n; });
   db.msgs.forEach(x => { if (x.from === o) x.from = n; if (x.to === o) x.to = n; });
   const lk = a => (a || []).map(x => x === o ? n : x);
+  Object.values(db.groups || {}).forEach(g => { if (g.owner === o) g.owner = n; g.members = lk(g.members); });
+  db.msgs.forEach(x => { if (x.rd) x.rd = lk(x.rd); if (x.hid) x.hid = lk(x.hid); });
   db.stories.forEach(s => { if (s.un === o) s.un = n; s.likes = lk(s.likes); });
   db.posts.forEach(p => { if (p.un === o) p.un = n; p.likes = lk(p.likes); p.cm.forEach(c => { if (c.un === o) c.un = n; }); });
   (db.notifs || []).forEach(x => { if (x.to === o) x.to = n; if (x.from === o) x.from = n; });
@@ -197,7 +208,7 @@ function route(req, res, P, u, b) {
     if (!/^(?=.*[a-z])[a-z0-9_.]{3,20}$/.test(un)) return err(res, 'اليوزر: 3 إلى 20 خانة، حروف إنجليزية وأرقام و _ و .');
     if (pw.length < 6) return err(res, 'كلمة السر لازم 6 خانات على الأقل');
     if (!isE) return err(res, 'التسجيل بالبريد الإلكتروني فقط');
-    if (db.users[un]) return err(res, 'هذا اليوزر مأخوذ، اختر غيره', 409);
+    if (unTaken(un)) return err(res, 'هذا اليوزر مأخوذ، اختر غيره', 409);
     const salt = crypto.randomBytes(16).toString('hex'), name = S(b.name).slice(0, 40) || un;
     if (isE) {
       const em = raw.toLowerCase();
@@ -278,7 +289,7 @@ function route(req, res, P, u, b) {
       const x = S(b.username).toLowerCase().replace(/^@/, '');
       if (x !== me) {
         if (!/^(?=.*[a-z])[a-z0-9_.]{3,20}$/.test(x)) return err(res, 'اليوزر: 3 إلى 20 خانة، حروف إنجليزية وأرقام و _ و .');
-        if (db.users[x]) return err(res, 'هذا اليوزر غير متاح أو محجوز', 409);
+        if (unTaken(x)) return err(res, 'هذا اليوزر غير متاح أو محجوز', 409);
         nu = x;
       }
     }
@@ -286,7 +297,7 @@ function route(req, res, P, u, b) {
     if (em && !/^\S+@\S+\.\S+$/.test(em)) return err(res, 'البريد الإلكتروني غير صحيح');
     if (b.avatar && !imgOK(b.avatar)) return err(res, 'الصورة غير صالحة');
     if (b.name !== undefined) m.name = S(b.name).slice(0, 40) || nu;
-    if (b.bio !== undefined) m.bio = S(b.bio).slice(0, 150);
+    if (b.bio !== undefined) { const nb = S(b.bio).slice(0, 150), ob = new Set(mentionsOf(m.bio, me)); mentionsOf(nb, me).filter(u => !ob.has(u) && !blockedP(me, u)).forEach(u => notify(u, 'mention', me, 'أشار إليك بالنبذة')); m.bio = nb; }
     if (em.toLowerCase() !== String(m.email || '').toLowerCase()) m.emailV = 0;
     m.email = em.toLowerCase();
     if (b.avatar) { m.avatar = b.avatar; m.avt = Date.now(); }
@@ -314,7 +325,8 @@ function route(req, res, P, u, b) {
     const vis = ['followers', 'friends', 'only'].includes(S(b.vis)) ? S(b.vis) : 'followers';
     const to = vis === 'only' ? (Array.isArray(b.to) ? b.to : []).map(S).filter(x => db.users[x] && x !== me).slice(0, 100) : [];
     if (vis === 'only' && !to.length) return err(res, 'اختر شخص واحد على الأقل');
-    db.stories.push({ id: crypto.randomBytes(6).toString('hex'), un: me, text, color, st: text ? stIn(b.st) : null, m: md ? b.media : '', k: md ? md.kind : '', time: Date.now(), vis, to });
+    const sObj = { id: crypto.randomBytes(6).toString('hex'), un: me, text, color, st: text ? stIn(b.st) : null, m: md ? b.media : '', k: md ? md.kind : '', time: Date.now(), vis, to };
+    db.stories.push(sObj); notifyMentions(text, me, 'بقصة', u => storyOK(sObj, u));
     prune(); return send(res, 200, { ok: 1 });
   }
   if (K === 'POST /api/stories/delete') { const dx = db.stories.find(s => s.id === b.id && s.un === me); if (dx && dx.m) rmMedia(dx.m); db.stories = db.stories.filter(s => !(s.id === b.id && s.un === me)); save(); return send(res, 200, { ok: 1 }); }
@@ -344,29 +356,115 @@ function route(req, res, P, u, b) {
   if (K === 'GET /api/chats') {
     const out = db.friends.filter(f => f[0] === me || f[1] === me).map(f => {
       const o = f[0] === me ? f[1] : f[0];
-      const ms = db.msgs.filter(x => ((x.from === me && x.to === o) || (x.from === o && x.to === me)) && !(x.hid && x.hid.includes(me)));
+      const ms = db.msgs.filter(x => !x.gr && ((x.from === me && x.to === o) || (x.from === o && x.to === me)) && !(x.hid && x.hid.includes(me)));
       const l = ms[ms.length - 1];
-      return { un: o, name: nm(o), av: av(o), last: l ? (l.text || (l.st ? 'ملصق' : l.k === 'video' ? '🎥 فيديو' : l.k === 'audio' ? '🎤 رسالة صوتية' : l.k === 'file' ? '📎 ' + (l.fn || 'ملف') : '📷 صورة')).slice(0, 60) : '', time: l ? l.time : 0, unread: ms.filter(x => x.from === o && !x.r).length, blocked: (db.blocks || []).some(x => x[0] === me && x[1] === o) ? 1 : 0 };
+      return { un: o, name: nm(o), av: av(o), last: l ? msgLabel(l).slice(0, 60) : '', time: l ? l.time : 0, unread: ms.filter(x => x.from === o && !x.r).length, blocked: (db.blocks || []).some(x => x[0] === me && x[1] === o) ? 1 : 0 };
+    });
+    Object.values(db.groups || {}).filter(g => g.members.includes(me)).forEach(g => {
+      const ms = db.msgs.filter(x => x.gr === g.un && !(x.hid && x.hid.includes(me)));
+      const l = ms[ms.length - 1];
+      out.push({ un: g.un, name: g.name, av: 0, g: 1, count: g.members.length, last: l ? ((l.from === me ? 'أنت: ' : nm(l.from) + ': ') + msgLabel(l)).slice(0, 60) : '', time: l ? l.time : g.created, unread: ms.filter(x => x.from !== me && !(x.rd || []).includes(me)).length, blocked: 0 });
     });
     return send(res, 200, out.sort((a, c) => c.time - a.time));
   }
   if (K === 'GET /api/msgs') {
-    const o = S(u.searchParams.get('with'));
-    if (!isF(me, o)) return err(res, 'ما بينكم صداقة', 403);
-    let ch = false;
-    const ms = db.msgs.filter(x => ((x.from === me && x.to === o) || (x.from === o && x.to === me)) && !(x.hid && x.hid.includes(me)));
-    ms.forEach(x => { if (x.to === me && !x.r) { x.r = 1; ch = true; } });
+    const o = S(u.searchParams.get('with')), g = GRP(o);
+    let ch = false, ms;
+    if (g) {
+      if (!g.members.includes(me)) return err(res, 'لست عضواً بهذه المجموعة', 403);
+      ms = db.msgs.filter(x => x.gr === o && !(x.hid && x.hid.includes(me)));
+      ms.forEach(x => { if (x.from !== me && !(x.rd || []).includes(me)) { (x.rd = x.rd || []).push(me); ch = true; } });
+    } else {
+      if (!isF(me, o)) return err(res, 'ما بينكم صداقة', 403);
+      ms = db.msgs.filter(x => !x.gr && ((x.from === me && x.to === o) || (x.from === o && x.to === me)) && !(x.hid && x.hid.includes(me)));
+      ms.forEach(x => { if (x.to === me && !x.r) { x.r = 1; ch = true; } });
+    }
     if (ch) save();
-    return send(res, 200, ms.filter(x => x.time > (+u.searchParams.get('after') || 0)).slice(-200).map(x => ({ from: x.from, text: x.text, m: x.m || '', k: x.k || '', st: x.st || '', fn: x.fn || '', r: x.r ? 1 : 0, time: x.time })));
+    return send(res, 200, ms.filter(x => x.time > (+u.searchParams.get('after') || 0)).slice(-200).map(mOut));
   }
   if (K === 'POST /api/send') {
-    const to = S(b.to), text = S(b.text).slice(0, 500);
+    const to = S(b.to), g = GRP(to), text = S(b.text).slice(0, 500);
     const md = b.media && owned(me, b.media), stk = /^\d{1,2}$/.test(S(b.sticker)) && +b.sticker < 12 ? S(b.sticker) : '';
     if (b.media && !md) return err(res, 'الملف غير صالح');
     if (!text && !md && !stk) return err(res, 'الرسالة فارغة');
-    if (!isF(me, to)) return err(res, 'لازم يوافق على طلبك أول', 403);
-    if ((db.blocks || []).some(x => (x[0] === me && x[1] === to) || (x[0] === to && x[1] === me))) return err(res, 'ما تكدر ترسل لهذا الشخص', 403);
-    const mt = Date.now(); db.msgs.push({ from: me, to, text, fn: md ? (md.name || '') : '', m: md ? b.media : '', k: md ? md.kind : '', st: stk, time: mt, r: 0 }); save(); return send(res, 200, { ok: 1, time: mt });
+    if (g) { if (!g.members.includes(me)) return err(res, 'لست عضواً بهذه المجموعة', 403); }
+    else {
+      if (!isF(me, to)) return err(res, 'لازم يوافق على طلبك أول', 403);
+      if (blockedP(me, to)) return err(res, 'ما تكدر ترسل لهذا الشخص', 403);
+    }
+    let rp = null;
+    if (b.reply) {
+      const pool = g ? db.msgs.filter(x => x.gr === to) : db.msgs.filter(x => !x.gr && ((x.from === me && x.to === to) || (x.from === to && x.to === me)));
+      const o = pool.find(x => mkMid(x) === S(b.reply));
+      if (o) rp = { id: mkMid(o), from: o.from, name: nm(o.from), t: msgLabel(o).slice(0, 80) };
+    }
+    const mt = Date.now(), msg = { id: crypto.randomBytes(5).toString('hex'), from: me, to: g ? '' : to, text, fn: md ? (md.name || '') : '', m: md ? b.media : '', k: md ? md.kind : '', st: stk, time: mt, r: 0, rp };
+    if (g) { msg.gr = to; msg.rd = []; }
+    db.msgs.push(msg);
+    if (g) notifyMentions(text, me, 'بمجموعة ' + g.name, u => g.members.includes(u));
+    save(); return send(res, 200, { ok: 1, time: mt, id: msg.id });
+  }
+  if (K === 'POST /api/groups') {
+    const name = S(b.name).trim().slice(0, 40); if (!name) return err(res, 'اكتب اسم المجموعة');
+    let un = S(b.un).toLowerCase().replace(/^@/, '');
+    if (un) { if (!/^(?=.*[a-z])[a-z0-9_.]{3,20}$/.test(un)) return err(res, 'اليوزر: 3 إلى 20 خانة، حروف إنجليزية وأرقام و _ و .'); if (unTaken(un)) return err(res, 'هذا اليوزر مأخوذ، اختر غيره', 409); }
+    else { do { un = 'g' + crypto.randomBytes(4).toString('hex'); } while (unTaken(un)); }
+    const ms = [...new Set((Array.isArray(b.members) ? b.members : []).map(x => S(x).toLowerCase()))].filter(x => x !== me && db.users[x] && isF(me, x)).slice(0, 49);
+    if (!ms.length) return err(res, 'اختر صديق واحد على الأقل');
+    db.groups = db.groups || {};
+    db.groups[un] = { un, name, owner: me, members: [me, ...ms], created: Date.now() };
+    ms.forEach(x => notify(x, 'msg', me, 'ضافك لمجموعة ' + name));
+    save(); return send(res, 200, { ok: 1, un });
+  }
+  if (K === 'GET /api/group') {
+    const g = GRP(S(u.searchParams.get('u')).toLowerCase());
+    if (!g || !g.members.includes(me)) return err(res, 'المجموعة غير موجودة', 404);
+    return send(res, 200, { un: g.un, name: g.name, owner: g.owner, mine: g.owner === me, created: g.created, members: g.members.map(x => Object.assign(person(x, me), { owner: x === g.owner })) });
+  }
+  if (K === 'POST /api/groups/edit') {
+    const g = GRP(S(b.u).toLowerCase());
+    if (!g || !g.members.includes(me)) return err(res, 'المجموعة غير موجودة', 404);
+    if (b.name !== undefined) { if (g.owner !== me) return err(res, 'بس مالك المجموعة يغيّر الاسم', 403); const nn = S(b.name).trim().slice(0, 40); if (!nn) return err(res, 'اكتب اسم المجموعة'); g.name = nn; }
+    if (Array.isArray(b.add)) b.add.map(x => S(x).toLowerCase()).forEach(x => { if (db.users[x] && !g.members.includes(x) && isF(me, x) && g.members.length < 50) { g.members.push(x); notify(x, 'msg', me, 'ضافك لمجموعة ' + g.name); } });
+    if (Array.isArray(b.remove)) { if (g.owner !== me) return err(res, 'بس مالك المجموعة يشيل الأعضاء', 403); const rm = b.remove.map(x => S(x).toLowerCase()); g.members = g.members.filter(x => x === g.owner || !rm.includes(x)); }
+    save(); return send(res, 200, { ok: 1 });
+  }
+  if (K === 'POST /api/groups/leave') {
+    const un = S(b.u).toLowerCase(), g = GRP(un);
+    if (!g || !g.members.includes(me)) return err(res, 'المجموعة غير موجودة', 404);
+    g.members = g.members.filter(x => x !== me);
+    if (!g.members.length) { delete db.groups[un]; db.msgs = db.msgs.filter(x => x.gr !== un); }
+    else if (g.owner === me) g.owner = g.members[0];
+    save(); return send(res, 200, { ok: 1 });
+  }
+  if (K === 'POST /api/share') {
+    const kind = b.kind === 'news' ? 'news' : 'post'; let ps;
+    if (kind === 'post') { const p = db.posts.find(x => x.id === S(b.id)); if (!p || !canSee(me, p.un)) return err(res, 'المنشور غير موجود', 404); ps = { k: 'post', id: p.id, un: p.un, name: nm(p.un), t: String(p.text || '').slice(0, 140), img: !!(p.img || p.m) }; }
+    else { const n = (db.news || {})[S(b.id)]; if (!n) return err(res, 'الخبر غير موجود', 404); ps = { k: 'news', id: n.id, un: '', name: 'نونو', t: String(n.title || '').slice(0, 140), img: false }; }
+    const tos = [...new Set((Array.isArray(b.to) ? b.to : []).map(S))].slice(0, 10), note = S(b.text).slice(0, 200);
+    let sent = 0;
+    tos.forEach(t => {
+      const g = GRP(t);
+      if (g) { if (!g.members.includes(me)) return; }
+      else if (!db.users[t] || !isF(me, t) || blockedP(me, t)) return;
+      const msg = { id: crypto.randomBytes(5).toString('hex'), from: me, to: g ? '' : t, text: note, fn: '', m: '', k: '', st: '', time: Date.now() + sent, r: 0, ps };
+      if (g) { msg.gr = t; msg.rd = []; }
+      db.msgs.push(msg); sent++;
+    });
+    if (!sent) return err(res, 'ما كدرت أرسل لأي شخص من المختارين');
+    save(); return send(res, 200, { ok: 1, sent });
+  }
+  if (K === 'GET /api/mention') {
+    const q = S(u.searchParams.get('q')).toLowerCase().replace(/^@/, '');
+    const fr = db.friends.filter(f => f[0] === me || f[1] === me).map(f => f[0] === me ? f[1] : f[0]);
+    const fo = db.follows.filter(f => f[0] === me).map(f => f[1]), fl = db.follows.filter(f => f[1] === me).map(f => f[0]);
+    const seen = new Set(), out = [];
+    [...fr, ...fo, ...fl, ...Object.keys(db.users)].forEach(x => {
+      if (seen.has(x) || x === me || !db.users[x]) return; seen.add(x);
+      if (q && !x.startsWith(q) && !String(db.users[x].name || '').toLowerCase().includes(q)) return;
+      out.push({ un: x, name: nm(x), av: av(x), v: isV(x) ? 1 : 0 });
+    });
+    return send(res, 200, out.slice(0, 6));
   }
   const ok = () => send(res, 200, { ok: 1 });
   const vp = id => { const p = db.posts.find(x => x.id === S(id)); return p && canSee(me, p.un) ? p : null; };
@@ -375,7 +473,7 @@ function route(req, res, P, u, b) {
     const x = S(u.searchParams.get('u')).toLowerCase().replace(/^@/, '');
     if (x === me) return send(res, 200, { ok: true });
     if (!/^(?=.*[a-z])[a-z0-9_.]{3,20}$/.test(x)) return send(res, 200, { ok: false, why: 'format' });
-    return send(res, 200, db.users[x] ? { ok: false, why: 'taken' } : { ok: true });
+    return send(res, 200, unTaken(x) ? { ok: false, why: 'taken' } : { ok: true });
   }
   if (K === 'POST /api/me/phone') {
     const ph = phoneOf(b.phone);
@@ -391,7 +489,7 @@ function route(req, res, P, u, b) {
   }
   if (K === 'POST /api/me/settings') {
     const s = setg(me);
-    ['msg', 'post', 'story', 'req'].forEach(k => { if (b.n && k in b.n) s.n[k] = b.n[k] ? 1 : 0; });
+    ['msg', 'post', 'story', 'req', 'mention'].forEach(k => { if (b.n && k in b.n) s.n[k] = b.n[k] ? 1 : 0; });
     if ('priv' in b) s.priv = b.priv ? 1 : 0;
     if ('noreq' in b) s.noreq = b.noreq ? 1 : 0;
     m.set = s; save(); return ok();
@@ -420,7 +518,7 @@ function route(req, res, P, u, b) {
   }
   if (K === 'POST /api/followers/remove') { db.follows = db.follows.filter(f => !(f[0] === S(b.from) && f[1] === me)); save(); return ok(); }
   if (K === 'POST /api/block') { const t = S(b.to); db.blocks = (db.blocks || []).filter(x => !(x[0] === me && x[1] === t)); if (b.on) db.blocks.push([me, t]); save(); return ok(); }
-  if (K === 'POST /api/chat/delete') { const o = S(b.with); db.msgs.forEach(x => { if (((x.from === me && x.to === o) || (x.from === o && x.to === me)) && !(x.hid && x.hid.includes(me))) x.hid = (x.hid || []).concat(me); }); save(); return ok(); }
+  if (K === 'POST /api/chat/delete') { const o = S(b.with); db.msgs.forEach(x => { if ((x.gr ? x.gr === o : ((x.from === me && x.to === o) || (x.from === o && x.to === me))) && !(x.hid && x.hid.includes(me))) x.hid = (x.hid || []).concat(me); }); save(); return ok(); }
   if (K === 'POST /api/unfriend') { const t = S(b.to); db.friends = db.friends.filter(f => !((f[0] === me && f[1] === t) || (f[0] === t && f[1] === me))); save(); return ok(); }
   if (K === 'GET /api/trend') {
     const n = Date.now(), bl = db.blocks || [];
@@ -448,6 +546,7 @@ function route(req, res, P, u, b) {
     const pcat = b.cat === 'local' ? 'local' : 'pub', pq = S(b.cc).toLowerCase();
     const pcc = pcat === 'local' ? (/^[a-z]{2}$/.test(pq) ? pq : (/^[a-z]{2}$/i.test(S(req.headers['x-vercel-ip-country'])) ? S(req.headers['x-vercel-ip-country']).toLowerCase() : 'iq')) : '';
     db.posts.push({ id: rid(), un: me, text, img, m: pm ? b.media : '', time: Date.now(), likes: [], cm: [], cat: pcat, cc: pcc });
+    notifyMentions(text, me, 'بمنشور', u => canSee(u, me));
     save(); return ok();
   }
   if (K === 'POST /api/posts/delete') { const dp = db.posts.find(p => p.id === S(b.id) && p.un === me); if (dp && dp.m) rmMedia(dp.m); db.posts = db.posts.filter(p => !(p.id === S(b.id) && p.un === me)); save(); return ok(); }
@@ -472,7 +571,7 @@ function route(req, res, P, u, b) {
     const p = vp(b.id), text = S(b.text).slice(0, 300);
     if (!p) return err(res, 'المنشور غير موجود', 404);
     if (!text) return err(res, 'اكتب تعليق');
-    p.cm.push({ id: rid(), un: me, text, time: Date.now() }); notify(p.un, 'post', me, 'علّق على منشورك: ' + text.slice(0, 40)); save(); return ok();
+    p.cm.push({ id: rid(), un: me, text, time: Date.now() }); notify(p.un, 'post', me, 'علّق على منشورك: ' + text.slice(0, 40)); notifyMentions(text, me, 'بتعليق', u => canSee(u, p.un)); save(); return ok();
   }
   if (K === 'POST /api/comments/delete') {
     const p = vp(b.id); if (!p) return err(res, 'المنشور غير موجود', 404);
@@ -602,7 +701,7 @@ function route(req, res, P, u, b) {
     if (!n) return err(res, 'الخبر غير موجود', 404);
     if (!text) return err(res, 'اكتب تعليق');
     if (n.cm.length >= 300) return err(res, 'التعليقات وصلت للحد الأعلى');
-    n.cm.push({ id: rid(), un: me, text, time: Date.now() }); save(); return ok();
+    n.cm.push({ id: rid(), un: me, text, time: Date.now() }); notifyMentions(text, me, 'بتعليق على خبر'); save(); return ok();
   }
   if (K === 'POST /api/news/comments/delete') {
     const n = nwGet(b.id); if (!n) return err(res, 'الخبر غير موجود', 404);
