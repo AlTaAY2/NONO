@@ -576,7 +576,7 @@ function route(req, res, P, u, b) {
       if (!pre || pre.cc !== cc) { wantNews = cc; return send(res, 200, { cc, items: [] }); }
       if (pre.items) {
         const ids = [];
-        pre.items.forEach(a => { const o = db.news[a.id]; db.news[a.id] = Object.assign(a, { likes: o ? o.likes : [], cm: o ? o.cm : [] }); ids.push(a.id); });
+        pre.items.forEach(a => { const o = db.news[a.id]; db.news[a.id] = Object.assign(a, { pub: a.time, time: o ? o.time : now, likes: o ? o.likes : [], cm: o ? o.cm : [] }); ids.push(a.id); });
         (c ? c.ids : []).forEach(id => { if (!ids.includes(id) && db.news[id] && now - db.news[id].time < 2592e5) ids.push(id); });
         c = db.newsCache[cc] = { t: now, ids: ids.slice(0, 40) };
         for (const k in db.news) if (now - db.news[k].time > 12096e5 && !db.news[k].cm.length) delete db.news[k];
